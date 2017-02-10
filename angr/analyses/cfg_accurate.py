@@ -978,7 +978,7 @@ class CFGAccurate(ForwardAnalysis, CFGBase):    # pylint: disable=abstract-metho
         while self._pending_function_hints:
             f = self._pending_function_hints.pop()
             if f not in analyzed_addrs:
-                new_state = self.project.factory.entry_state('fastpath')
+                new_state = self.project.factory.entry_state(mode='fastpath')
                 new_state.ip = new_state.se.BVV(f, self.project.arch.bits)
 
                 # TOOD: Specially for MIPS
@@ -990,7 +990,16 @@ class CFGAccurate(ForwardAnalysis, CFGBase):    # pylint: disable=abstract-metho
                                           new_state,
                                           self._context_sensitivity_level
                                           )
-                remaining_entries.append(new_path_wrapper)
+
+                pe = PendingExit(f,
+                                 new_state,
+                                 new_path_wrapper.block_id,
+                                 None, #suc_exit_stmt_idx
+                                 None, #suc_exit_ins_addr
+                                 new_path_wrapper.call_stack)
+                
+                remaining_entries[new_path_wrapper.block_id] = pe
+
                 l.debug('Picking a function 0x%x from pending function hints.', f)
                 self.kb.functions.function(new_path_wrapper.func_addr, create=True)
                 break
@@ -2424,12 +2433,17 @@ class CFGAccurate(ForwardAnalysis, CFGBase):    # pylint: disable=abstract-metho
 
         function_hints = []
 
+        non_action_data = [action for action in successor_state.log.actions if not isinstance(action, simuvex.s_action.SimActionData)]
+        action_data = [action for action in successor_state.log.actions if isinstance(action, simuvex.s_action.SimActionData)]
+        
         for action in successor_state.log.actions:
             if action.type == 'reg' and action.offset == self.project.arch.ip_offset:
                 # Skip all accesses to IP registers
                 continue
             elif action.type == 'exit':
                 # only consider read/write actions
+                continue
+            elif not isinstance(action, simuvex.s_action.SimActionData):
                 continue
 
             # Enumerate actions
