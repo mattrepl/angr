@@ -273,7 +273,7 @@ class SimSolver(SimStatePlugin):
             self._stored_solver = claripy.SolverCacheless(track=track)
         elif o.SYMBOLIC in self.state.options and o.COMPOSITE_SOLVER in self.state.options:
             self._stored_solver = claripy.SolverComposite(track=track)
-        elif o.SYMBOLIC in self.state.options and o.approximation & self.state.options:
+        elif o.SYMBOLIC in self.state.options and any(opt in self.state.options for opt in o.approximation):
             self._stored_solver = claripy.SolverHybrid(track=track)
         elif o.SYMBOLIC in self.state.options:
             self._stored_solver = claripy.Solver(track=track)
@@ -719,7 +719,7 @@ class SimSolver(SimStatePlugin):
         """
         try:
             return self.eval_exact(e, 1, **{k: v for (k, v) in kwargs.iteritems() if k != 'default'})[0]
-        except (SimUnsatError, SimValueError):
+        except (SimUnsatError, SimValueError, SimSolverModeError):
             if 'default' in kwargs:
                 return kwargs.pop('default')
             raise
