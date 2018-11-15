@@ -7,7 +7,7 @@ import cle
 from .resolver import IndirectJumpResolver
 
 
-l = logging.getLogger("angr.analyses.cfg.indirect_jump_resolvers.x86_elf_pic_plt")
+l = logging.getLogger(name=__name__)
 
 
 class X86ElfPicPltResolver(IndirectJumpResolver):
@@ -87,6 +87,6 @@ class X86ElfPicPltResolver(IndirectJumpResolver):
         if len(successors.flat_successors) != 1:
             return False, [ ]
 
-        target = state.se.eval_one(successors.flat_successors[0].ip)
+        target = state.solver.eval_one(successors.flat_successors[0].ip)
 
         return True, [ target ]

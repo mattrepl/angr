@@ -4,7 +4,7 @@ import operator
 from .constants import DEBUG
 from .undefined import Undefined
 
-l = logging.getLogger('angr.analyses.reaching_definitions.dataset')
+l = logging.getLogger(name=__name__)
 
 
 class DataSet(object):
@@ -68,7 +68,7 @@ class DataSet(object):
             else:
                 try:
                     tmp = op(s)
-                    if isinstance(tmp, (int, long)):
+                    if isinstance(tmp, int):
                         tmp &= self._mask
                     res.add(tmp)
                 except TypeError as e:
@@ -92,7 +92,7 @@ class DataSet(object):
                 else:
                     try:
                         tmp = op(s, o)
-                        if isinstance(tmp, (int, long)):
+                        if isinstance(tmp, int):
                             tmp &= self._mask
                         res.add(tmp)
                     except TypeError as e:
@@ -130,6 +130,9 @@ class DataSet(object):
             return self.data == other.data and self._bits == other.bits and self._mask == other.mask
         else:
             return False
+
+    def __hash__(self):
+        return hash((self._bits, self._mask))
 
     def __iter__(self):
         return iter(self.data)

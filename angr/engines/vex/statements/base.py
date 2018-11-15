@@ -1,6 +1,6 @@
 import logging
 from pyvex.const import get_type_size
-l = logging.getLogger("angr.engines.vex.statements.base")
+l = logging.getLogger(name=__name__)
 
 class SimIRStmt(object):
     """A class for symbolically translating VEX IRStmts."""
@@ -26,7 +26,7 @@ class SimIRStmt(object):
         s = self.size_bits(ty)
         if s % self.state.arch.byte_width != 0:
             raise Exception("SimIRExpr.size_bytes() called for a non-byte size!")
-        return s/self.state.arch.byte_width
+        return s // self.state.arch.byte_width
 
 
     def process(self):

@@ -1,6 +1,5 @@
 import traceback
 
-import pyvex
 import archinfo
 
 from ...codenode import BlockNode, HookNode
@@ -35,7 +34,8 @@ class CFGNode(object):
     """
 
     __slots__ = ( 'addr', 'simprocedure_name', 'syscall_name', 'size', 'no_ret', 'is_syscall', 'function_address',
-                  'block_id', 'thumb', 'byte_string', 'name', 'instruction_addrs', 'irsb', 'has_return', '_cfg',
+                  'block_id', 'thumb', 'byte_string', '_name', 'instruction_addrs', 'irsb', 'has_return', '_cfg',
+                  '_hash',
                   )
 
     def __init__(self,
@@ -67,32 +67,37 @@ class CFGNode(object):
         self.thumb = thumb
         self.byte_string = byte_string
 
-        self.name = simprocedure_name
-        if self.name is None:
-            sym = cfg.project.loader.find_symbol(addr)
-            if sym is not None:
-                self.name = sym.name
-        if self.name is None and isinstance(cfg.project.arch, archinfo.ArchARM) and addr & 1:
-            sym = cfg.project.loader.find_symbol(addr - 1)
-            if sym is not None:
-                self.name = sym.name
-        if function_address and self.name is None:
-            sym = cfg.project.loader.find_symbol(function_address)
-            if sym is not None:
-                self.name = sym.name
-            if self.name is not None:
-                offset = addr - function_address
-                self.name = "%s%+#x" % (self.name, offset)
-
+        self._name = simprocedure_name
         self.instruction_addrs = instruction_addrs if instruction_addrs is not None else tuple()
 
         if not instruction_addrs and not self.is_simprocedure:
             # We have to collect instruction addresses by ourselves
             if irsb is not None:
-                self.instruction_addrs = tuple(s.addr + s.delta for s in irsb.statements if type(s) is pyvex.IRStmt.IMark)  # pylint:disable=unidiomatic-typecheck
+                self.instruction_addrs = irsb.instruction_addresses
 
-        self.irsb = irsb
+        self.irsb = None #irsb
         self.has_return = False
+        self._hash = None
+
+    @property
+    def name(self):
+        if self._name is None:
+            sym = self._cfg.project.loader.find_symbol(self.addr)
+            if sym is not None:
+                self._name = sym.name
+        if self._name is None and isinstance(self._cfg.project.arch, archinfo.ArchARM) and self.addr & 1:
+            sym = self._cfg.project.loader.find_symbol(self.addr - 1)
+            if sym is not None:
+                self._name = sym.name
+        if self.function_address and self._name is None:
+            sym = self._cfg.project.loader.find_symbol(self.function_address)
+            if sym is not None:
+                self._name = sym.name
+            if self._name is not None:
+                offset = self.addr - self.function_address
+                self._name = "%s%+#x" % (self._name, offset)
+
+        return self._name
 
     @property
     def successors(self):
@@ -156,7 +161,9 @@ class CFGNode(object):
                 )
 
     def __hash__(self):
-        return hash((self.addr, self.simprocedure_name, ))
+        if self._hash is None:
+            self._hash = hash((self.addr, self.simprocedure_name, ))
+        return self._hash
 
     def to_codenode(self):
         if self.is_simprocedure:
@@ -172,9 +179,9 @@ class CFGNode(object):
         return b
 
 
-class CFGNodeA(CFGNode):
+class CFGENode(CFGNode):
     """
-    The CFGNode that is used in CFGAccurate.
+    The CFGNode that is used in CFGEmulated.
     """
 
     __slots__ = [ 'input_state', 'looping_times', 'callstack', 'depth', 'final_states', 'creation_failure_info',
@@ -206,7 +213,7 @@ class CFGNodeA(CFGNode):
                  creation_failure_info=None,
                  ):
 
-        super(CFGNodeA, self).__init__(addr, size, cfg,
+        super(CFGENode, self).__init__(addr, size, cfg,
                                        simprocedure_name=simprocedure_name,
                                        is_syscall=is_syscall,
                                        no_ret=no_ret,
@@ -256,7 +263,7 @@ class CFGNodeA(CFGNode):
         self.final_states = [ ]
 
     def __repr__(self):
-        s = "<CFGNodeA "
+        s = "<CFGENode "
         if self.name is not None:
             s += self.name + " "
         s += hex(self.addr)
@@ -272,7 +279,7 @@ class CFGNodeA(CFGNode):
     def __eq__(self, other):
         if isinstance(other, SimSuccessors):
             raise ValueError("You do not want to be comparing a SimSuccessors instance to a CFGNode.")
-        if not isinstance(other, CFGNodeA):
+        if not isinstance(other, CFGENode):
             return False
         return (self.callstack_key == other.callstack_key and
                 self.addr == other.addr and
@@ -285,7 +292,7 @@ class CFGNodeA(CFGNode):
         return hash((self.callstack_key, self.addr, self.looping_times, self.simprocedure_name, self.creation_failure_info))
 
     def copy(self):
-        return CFGNodeA(
+        return CFGENode(
             self.addr,
             self.size,
             self._cfg,

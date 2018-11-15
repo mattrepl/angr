@@ -10,7 +10,7 @@ from ...block import Block, BlockNode
 from .. import Analysis, register_analysis
 from .region_identifier import RegionIdentifier, MultiNode, GraphRegion
 
-l = logging.getLogger('angr.analyses.structurer')
+l = logging.getLogger(name=__name__)
 
 INDENT_DELTA = 2
 
@@ -507,7 +507,7 @@ class Structurer(Analysis):
                 break
 
         # make all conditionally-reachable nodes a ConditionNode
-        for i in xrange(len(seq.nodes)):
+        for i in range(len(seq.nodes)):
             node = seq.nodes[i]
             if node.reaching_condition is not None and not claripy.is_true(node.reaching_condition):
                 new_node = ConditionNode(node.addr, None, node.reaching_condition, node, None)
