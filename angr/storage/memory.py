@@ -478,6 +478,7 @@ class SimMemory(SimStatePlugin):
         :param bool disable_actions: Whether this store should avoid creating SimActions or not. When set to False,
                                      state options are respected.
         """
+
         if priv is not None: self.state.scratch.push_priv(priv)
 
         addr_e = _raw_ast(addr)
@@ -510,6 +511,11 @@ class SimMemory(SimStatePlugin):
             size_e = self.state.solver.BVV(size_e, self.state.arch.bits)
         elif size_e is None:
             size_e = self.state.solver.BVV(data_e.size() // self.state.arch.byte_width, self.state.arch.bits)
+
+        if len(data_e) % self.state.arch.byte_width != 0:
+            raise SimMemoryError("Attempting to store non-byte data to memory")
+        if not size_e.symbolic and (len(data_e) < size_e*self.state.arch.byte_width).is_true():
+            raise SimMemoryError("Provided data is too short for this memory store")
 
         if inspect is True:
             if self.category == 'reg':
@@ -553,7 +559,7 @@ class SimMemory(SimStatePlugin):
 
         request = MemoryStoreRequest(addr_e, data=data_e, size=size_e, condition=condition_e, endness=endness)
         try:
-            self._store(request)
+            self._store(request) #will use state_plugins/symbolic_memory.py
         except SimSegfaultError as e:
             e.original_addr = addr_e
             raise
@@ -903,6 +909,7 @@ class SimMemory(SimStatePlugin):
     def _copy_contents(self, _dst, _src, _size, condition=None, src_memory=None, dst_memory=None, inspect=True,
                       disable_actions=False):
         raise NotImplementedError()
+
 
 from .. import sim_options as o
 from ..state_plugins.sim_action import SimActionData

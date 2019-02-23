@@ -1,26 +1,18 @@
 import logging
 import os
 import types
-import weakref
 from io import BytesIO, IOBase
 import pickle
 import string
 from collections import defaultdict
 
 import archinfo
+from archinfo.arch_soot import SootAddressDescriptor, ArchSoot
 import cle
 
 from .misc.ux import deprecated
 
 l = logging.getLogger(name=__name__)
-projects = weakref.WeakValueDictionary()
-
-def fake_project_unpickler(name):
-    if name not in projects:
-        raise AngrError("Project %s has not been opened." % name)
-    return projects[name]
-fake_project_unpickler.__safe_for_unpickling__ = True
-
 
 def load_shellcode(shellcode, arch, start_offset=0, load_address=0):
     """
@@ -100,11 +92,14 @@ class Project:
                  store_function=None,
                  load_function=None,
                  analyses_preset=None,
+                 concrete_target=None,
                  engines_preset=None,
                  **kwargs):
 
         # Step 1: Load the binary
+
         if load_options is None: load_options = {}
+
         load_options.update(kwargs)
 
         if isinstance(thing, cle.Loader):
@@ -122,10 +117,7 @@ class Project:
             # use angr's loader, provided by cle
             l.info("Loading binary %s", thing)
             self.filename = thing
-            self.loader = cle.Loader(self.filename, **load_options)
-
-        if self.filename is not None:
-            projects[self.filename] = self
+            self.loader = cle.Loader(self.filename, concrete_target=concrete_target, **load_options)
 
         # Step 2: determine its CPU architecture, ideally falling back to CLE's guess
         if isinstance(arch, str):
@@ -144,9 +136,25 @@ class Project:
             ignore_functions = []
 
         if isinstance(exclude_sim_procedures_func, types.LambdaType):
-            l.warning("Passing a lambda type as the exclude_sim_procedures_func argument to Project causes the resulting object to be un-serializable.")
+            l.warning("Passing a lambda type as the exclude_sim_procedures_func argument to "
+                      "Project causes the resulting object to be un-serializable.")
 
         self._sim_procedures = {}
+
+        self.concrete_target = concrete_target
+
+        # It doesn't make any sense to have auto_load_libs
+        # if you have the concrete target, let's warn the user about this.
+        if self.concrete_target and load_options.get('auto_load_libs', None):
+
+            l.critical("Incompatible options selected for this project, please disable auto_load_libs if "
+                       "you want to use a concrete target.")
+            raise Exception("Incompatible options for the project")
+
+        if self.concrete_target and self.arch.name not in ['X86', 'AMD64']:
+            l.critical("Concrete execution does not support yet the selected architecture. Aborting.")
+            raise Exception("Incompatible options for the project")
+
         self._default_analysis_mode = default_analysis_mode
         self._exclude_sim_procedures_func = exclude_sim_procedures_func
         self._exclude_sim_procedures_list = exclude_sim_procedures_list
@@ -204,13 +212,20 @@ class Project:
             raise ValueError("Invalid OS specification or non-matching architecture.")
 
         # Step 6: Register simprocedures as appropriate for library functions
+        if isinstance(self.arch, ArchSoot) and self.simos.is_javavm_with_jni_support:
+            # If we execute a Java archive that includes native JNI libraries,
+            # we need to use the arch of the native simos for all (native) sim
+            # procedures.
+            sim_proc_arch = self.simos.native_arch
+        else:
+            sim_proc_arch = self.arch
         for obj in self.loader.initial_load_objects:
-            self._register_object(obj)
+            self._register_object(obj, sim_proc_arch)
 
         # Step 7: Run OS-specific configuration
         self.simos.configure_project()
 
-    def _register_object(self, obj):
+    def _register_object(self, obj, sim_proc_arch):
         """
         This scans through an objects imports and hooks them with simprocedures from our library whenever possible
         """
@@ -276,7 +291,7 @@ class Project:
                 if not sim_lib.has_implementation(export.name):
                     continue
                 l.info("Using builtin SimProcedure for %s from %s", export.name, sim_lib.name)
-                self.hook_symbol(export.rebased_addr, sim_lib.get(export.name, self.arch))
+                self.hook_symbol(export.rebased_addr, sim_lib.get(export.name, sim_proc_arch))
 
             # Step 2.3: If 2.2 didn't work, check if the symbol wants to be resolved
             # by a library we already know something about. Resolve it appropriately.
@@ -289,10 +304,10 @@ class Project:
                 if self._check_user_blacklists(export.name):
                     if not func.is_weak:
                         l.info("Using stub SimProcedure for unresolved %s from %s", func.name, sim_lib.name)
-                        self.hook_symbol(export.rebased_addr, sim_lib.get_stub(export.name, self.arch))
+                        self.hook_symbol(export.rebased_addr, sim_lib.get_stub(export.name, sim_proc_arch))
                 else:
                     l.info("Using builtin SimProcedure for unresolved %s from %s", export.name, sim_lib.name)
-                    self.hook_symbol(export.rebased_addr, sim_lib.get(export.name, self.arch))
+                    self.hook_symbol(export.rebased_addr, sim_lib.get(export.name, sim_proc_arch))
 
             # Step 2.4: If 2.3 didn't work (the symbol didn't request a provider we know of), try
             # looking through each of the SimLibraries we're using to resolve unresolved
@@ -305,15 +320,15 @@ class Project:
                         if self._check_user_blacklists(export.name):
                             if not func.is_weak:
                                 l.info("Using stub SimProcedure for unresolved %s from %s", export.name, sim_lib.name)
-                                self.hook_symbol(export.rebased_addr, sim_lib.get_stub(export.name, self.arch))
+                                self.hook_symbol(export.rebased_addr, sim_lib.get_stub(export.name, sim_proc_arch))
                         else:
                             l.info("Using builtin SimProcedure for unresolved %s from %s", export.name, sim_lib.name)
-                            self.hook_symbol(export.rebased_addr, sim_lib.get(export.name, self.arch))
+                            self.hook_symbol(export.rebased_addr, sim_lib.get(export.name, sim_proc_arch))
                         break
                 else:
                     if not func.is_weak:
                         l.info("Using stub SimProcedure for unresolved %s", export.name)
-                        self.hook_symbol(export.rebased_addr, missing_libs[0].get(export.name, self.arch))
+                        self.hook_symbol(export.rebased_addr, missing_libs[0].get(export.name, sim_proc_arch))
 
             # Step 2.5: If 2.4 didn't work (we have NO SimLibraries to work with), just
             # use the vanilla ReturnUnconstrained, assuming that this isn't a weak func
@@ -395,13 +410,14 @@ class Project:
         l.debug('hooking %#x with %s', addr, hook)
 
         if self.is_hooked(addr):
+            addr_str = "%s" % repr(addr) if isinstance(addr, SootAddressDescriptor) else "%#x" % addr
             if replace is True:
                 pass
             elif replace is False:
-                l.warning("Address is already hooked, during hook(%#x, %s). Not re-hooking.", addr, hook)
+                l.warning("Address is already hooked, during hook(%s, %s). Not re-hooking.", addr_str, hook)
                 return
             else:
-                l.warning("Address is already hooked, during hook(%#x, %s). Re-hooking.", addr, hook)
+                l.warning("Address is already hooked, during hook(%s, %s). Re-hooking.", addr_str, hook)
 
         if isinstance(hook, type):
             raise TypeError("Please instanciate your SimProcedure before hooking with it")
@@ -531,6 +547,22 @@ class Project:
         self.unhook(hook_addr)
         return True
 
+    def rehook_symbol(self, new_address, symbol_name):
+        """
+        Move the hook for a symbol to a specific address
+        :param new_address: the new address that will trigger the SimProc execution
+        :param symbol_name: the name of the symbol (f.i. strcmp )
+        :return: None
+        """
+        new_sim_procedures = {}
+        for key_address, simproc_obj in self._sim_procedures.items():
+            if simproc_obj.display_name == symbol_name:
+                new_sim_procedures[new_address] = simproc_obj
+            else:
+                new_sim_procedures[key_address] = simproc_obj
+
+        self._sim_procedures = new_sim_procedures
+
     #
     # A convenience API (in the style of triton and manticore) for symbolic execution.
     #
@@ -583,6 +615,7 @@ class Project:
 
         def hook_decorator(func):
             self.hook(addr, func, length=length, kwargs=kwargs)
+            return func
 
         return hook_decorator
 
@@ -649,6 +682,14 @@ class Project:
         return '<Project %s>' % (self.filename if self.filename is not None else 'loaded from stream')
 
     #
+    # Properties
+    #
+
+    @property
+    def use_sim_procedures(self):
+        return self._should_use_sim_procedures
+
+    #
     # Compatibility
     #
 
@@ -658,7 +699,7 @@ class Project:
         return self.simos
 
 
-from .errors import AngrError, AngrNoPluginError
+from .errors import AngrNoPluginError
 from .factory import AngrObjectFactory
 from angr.simos import SimOS, os_mapping
 from .analyses.analysis import AnalysesHub

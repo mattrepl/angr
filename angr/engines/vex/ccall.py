@@ -949,61 +949,48 @@ def x86g_calculate_daa_das_aaa_aas(state, flags_and_AX, opcode):
     r_AL = (flags_and_AX >> 0) & 0xFF
     r_AH = (flags_and_AX >> 8) & 0xFF
 
-    #if opcode == 0x27: # DAA
-    #    old_AL = r_AL
-    #    old_C  = r_C
-    #    r_C = state.solver.If((r_AL & 0xF) > 9 || r_A == 1, old_C, state.solver.BVV(0, 32))
-    #    r_A = state.solver.If((r_AL & 0xF) > 9 || r_A == 1,
-    #    if ((r_AL & 0xF) > 9 || r_A == 1) {
-    #        r_AL = r_AL + 6;
-    #        r_C  = old_C;
-    #        if (r_AL >= 0x100) r_C = 1;
-    #        r_A = 1;
-    #    } else {
-    #       r_A = 0;
-    #    }
-    #    if (old_AL > 0x99 || old_C == 1) {
-    #       r_AL = r_AL + 0x60;
-    #       r_C  = 1;
-    #    } else {
-    #       r_C = 0;
-    #    }
-    #    r_AL &= 0xFF;
-    #    r_O = 0
-    #    r_S = (r_AL & 0x80) ? 1 : 0;
-    #    r_Z = (r_AL == 0) ? 1 : 0;
-    #    r_P = calc_parity_8bit( r_AL );
-    #elif opcode == 0x2F: # DAS
-    #    old_AL = r_AL;
-    #    old_C  = r_C;
-    #    r_C = 0;
-    #    if ((r_AL & 0xF) > 9 || r_A == 1) {
-    #       Bool borrow = r_AL < 6;
-    #       r_AL = r_AL - 6;
-    #       r_C  = old_C;
-    #       if (borrow) r_C = 1;
-    #       r_A = 1;
-    #    } else {
-    #       r_A = 0;
-    #    }
-    #     if (old_AL > 0x99 || old_C == 1) {
-    #        r_AL = r_AL - 0x60;
-    #        r_C  = 1;
-    #     } else {
-    #        /* Intel docs are wrong: r_C = 0; */
-    #     }
-    #     /* O is undefined.  S Z and P are set according to the
-    #        result. */
-    #     r_AL &= 0xFF;
-    #     r_O = 0; /* let's say */
-    #     r_S = (r_AL & 0x80) ? 1 : 0;
-    #     r_Z = (r_AL == 0) ? 1 : 0;
-    #     r_P = calc_parity_8bit( r_AL );
-    #     break;
-    #  }
     zero = state.solver.BVV(0, 32)
     one = state.solver.BVV(1, 32)
-    if opcode == 0x37: # AAA
+
+    if opcode == 0x27: # DAA
+        old_AL = r_AL
+        old_C  = r_C
+
+        condition = state.solver.Or((r_AL & 0xF) > 9, r_A == 1)
+        r_AL = state.solver.If(condition, r_AL + 6, old_AL)
+        r_C = state.solver.If(condition, state.solver.If(r_AL >= 0x100, one, old_C), zero)
+        r_A = state.solver.If(condition, one, zero)
+
+        condition = state.solver.Or(old_AL > 0x99, old_C == 1)
+        r_AL = state.solver.If(condition, r_AL + 0x60, r_AL)
+        r_C = state.solver.If(condition, one, zero)
+    
+        r_AL = r_AL&0xFF
+        r_O = zero 
+        r_S = state.solver.If((r_AL & 0x80) != 0, one, zero)
+        r_Z = state.solver.If(r_AL == 0, one, zero)
+        r_P = calc_paritybit(state, r_AL).zero_extend(31)
+
+    elif opcode == 0x2F: # DAS
+        old_AL = r_AL
+        old_C  = r_C
+
+        condition = state.solver.Or((r_AL & 0xF) > 9, r_A == 1)
+        r_AL = state.solver.If(condition, r_AL - 6, old_AL)
+        r_C = state.solver.If(condition, state.solver.If(r_AL < 6, one, zero), zero)
+        r_A = state.solver.If(condition, one, zero)
+
+        condition = state.solver.Or(old_AL > 0x99, old_C == 1)
+        r_AL = state.solver.If(condition, r_AL - 0x60, r_AL)
+        r_C = state.solver.If(condition, one, zero)
+
+        r_AL &= 0xFF
+        r_O = zero
+        r_S = state.solver.If((r_AL & 0x80) != 0, one, zero)
+        r_Z = state.solver.If(r_AL == 0, one, zero)
+        r_P = calc_paritybit(state, r_AL).zero_extend(31)
+
+    elif opcode == 0x37: # AAA
         nudge = r_AL > 0xF9
         condition = state.solver.Or((r_AL & 0xF) > 9, r_A == 1)
         r_AL = state.solver.If(condition, (r_AL + 6) & 0xF, r_AL & 0xF)
@@ -1019,8 +1006,6 @@ def x86g_calculate_daa_das_aaa_aas(state, flags_and_AX, opcode):
         r_A  = state.solver.If(condition, one, zero)
         r_C = state.solver.If(condition, one, zero)
         r_O = r_S = r_Z = r_P = 0
-    else:
-        raise SimCCallError("DAA/DAS instructions are unsupported")
 
     result =   ( (r_O & 1) << (16 + data['X86']['CondBitOffsets']['G_CC_SHIFT_O']) ) \
              | ( (r_S & 1) << (16 + data['X86']['CondBitOffsets']['G_CC_SHIFT_S']) ) \
@@ -1105,8 +1090,15 @@ def x86g_use_seg_selector(state, ldt, gdt, seg_selector, virtual_addr):
     if state.arch.vex_archinfo['x86_cr0'] & 1 == 0:
         return ((seg_selector << 4) + virtual_addr).zero_extend(32), ()
 
-
     seg_selector &= 0x0000FFFF
+
+    segment_selector_val = state.solver.eval(seg_selector >> 3)
+
+    if state.project.simos.name == "Win32" and segment_selector_val == 0x6 and state.project.concrete_target is not None:
+            return bad("angr doesn't support Windows Heaven's gate calls http://rce.co/knockin-on-heavens-gate-dynamic-processor-mode-switching/ \n"
+                   "Please use the native 32 bit libs (not WoW64) or implement a simprocedure to avoid executing these instructions"
+                   )
+
 
     # RPL=11 check
     #if state.solver.is_true((seg_selector & 3) != 3):
@@ -1155,7 +1147,9 @@ def x86g_use_seg_selector(state, ldt, gdt, seg_selector, virtual_addr):
     base = get_segdescr_base(state, descriptor)
     limit = get_segdescr_limit(state, descriptor)
 
-    if state.solver.is_true(virtual_addr >= limit):
+    # When a concrete target is set and memory is read directly from the process sometimes a negative offset
+    # from a segment register is used
+    if state.solver.is_true(virtual_addr >= limit) and state.project.concrete_target is None:
         return bad("virtual_addr >= limit")
 
     r = (base + virtual_addr).zero_extend(32)

@@ -41,6 +41,33 @@ class PosixDevFS(SimMount): # this'll be mounted at /dev
     def copy(self, _):
         return self # this holds no state!
 
+
+class PosixProcFS(SimMount):
+    """
+    The virtual file system mounted at /proc (as of now, on Linux).
+    """
+    def get(self, path):
+        if path == [b"uptime"]:
+            return SimFile(b"uptime", content=b"0 0")
+        else:
+            return None
+
+    def insert(self, path, simfile): # pylint: disable=unused-argument
+        return False
+
+    def delete(self, path): # pylint: disable=unused-argument
+        return False
+
+    def merge(self, others, conditions, common_ancestor=None): # pylint: disable=unused-argument
+        return False
+
+    def widen(self, others): # pylint: disable=unused-argument
+        return False
+
+    def copy(self, _):
+        return self # this holds no state!
+
+
 class SimSystemPosix(SimStatePlugin):
     """
     Data storage and interaction mechanisms for states with an environment conforming to posix.
@@ -128,6 +155,7 @@ class SimSystemPosix(SimStatePlugin):
         self.uid = 1000 if uid is None else uid
         self.gid = 1000 if gid is None else gid
         self.dev_fs = None
+        self.proc_fs = None
         self.autotmp_counter = 0
 
         self.sockets = sockets if sockets is not None else {}
@@ -164,6 +192,9 @@ class SimSystemPosix(SimStatePlugin):
         if self.dev_fs is None:
             self.dev_fs = PosixDevFS()
             self.state.fs.mount(b"/dev", self.dev_fs)
+        if self.proc_fs is None:
+            self.proc_fs = PosixProcFS()
+            self.state.fs.mount(b"/proc", self.proc_fs)
 
     def set_brk(self, new_brk):
         # arch word size is not available at init for some reason, fix that here
@@ -289,6 +320,10 @@ class SimSystemPosix(SimStatePlugin):
                 sockpair = self.socket_queue.pop(0)
                 if sockpair is not None:
                     memo = {}
+                    # Since we are not copying sockpairs when the FS state plugin branches, their original SimState
+                    # instances might have long gone. Update their states before making copies.
+                    sockpair[0].set_state(self.state)
+                    sockpair[1].set_state(self.state)
                     sockpair = sockpair[0].copy(memo), sockpair[1].copy(memo)
 
             if sockpair is None:
@@ -420,7 +455,9 @@ class SimSystemPosix(SimStatePlugin):
                 stderr=self.stderr.copy(memo),
                 fd={k: self.fd[k].copy(memo) for k in self.fd},
                 sockets={ident: tuple(x.copy(memo) for x in self.sockets[ident]) for ident in self.sockets},
-                socket_queue=self.socket_queue, # shouldn't need to copy this - should be copied before use
+                socket_queue=self.socket_queue, # shouldn't need to copy this - should be copied before use.
+                                                # as a result, we must update the state of each socket before making
+                                                # copies.
                 argv=self.argv,
                 argc=self.argc,
                 environ=self.environ,
@@ -434,6 +471,7 @@ class SimSystemPosix(SimStatePlugin):
                 gid=self.gid,
                 brk=self.brk)
         o.dev_fs = self.dev_fs.copy(memo)
+        o.proc_fs = self.proc_fs.copy(memo)
         return o
 
     def merge(self, others, merge_conditions, common_ancestor=None):

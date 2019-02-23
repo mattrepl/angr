@@ -1,4 +1,5 @@
 import logging
+import struct
 
 import claripy
 from archinfo import ArchMIPS32, ArchS390X
@@ -8,7 +9,6 @@ from ..errors import (
     AngrCallableMultistateError,
     AngrSimOSError,
 )
-
 from ..sim_state import SimState
 from ..state_plugins import SimSystemPosix
 from ..calling_conventions import DEFAULT_CC
@@ -31,7 +31,8 @@ class SimOS:
         self.project = project
         self.name = name
         self.return_deadend = None
-        self.unresolvable_target = None
+        self.unresolvable_jump_target = None
+        self.unresolvable_call_target = None
 
     def configure_project(self):
         """
@@ -40,8 +41,10 @@ class SimOS:
         self.return_deadend = self.project.loader.extern_object.allocate()
         self.project.hook(self.return_deadend, P['stubs']['CallReturn']())
 
-        self.unresolvable_target = self.project.loader.extern_object.allocate()
-        self.project.hook(self.unresolvable_target, P['stubs']['UnresolvableTarget']())
+        self.unresolvable_jump_target = self.project.loader.extern_object.allocate()
+        self.project.hook(self.unresolvable_jump_target, P['stubs']['UnresolvableJumpTarget']())
+        self.unresolvable_call_target = self.project.loader.extern_object.allocate()
+        self.project.hook(self.unresolvable_call_target, P['stubs']['UnresolvableCallTarget']())
 
         def irelative_resolver(resolver_addr):
             # autohooking runs before this does, might have provided this already
@@ -50,7 +53,10 @@ class SimOS:
             if self.project.is_hooked(resolver_addr):
                 return resolver_addr
 
-            resolver = self.project.factory.callable(resolver_addr, concrete_only=True)
+
+            base_state = self.state_blank(addr=0,
+                add_options={o.SYMBOL_FILL_UNCONSTRAINED_MEMORY, o.SYMBOL_FILL_UNCONSTRAINED_REGISTERS})
+            resolver = self.project.factory.callable(resolver_addr, concrete_only=True, base_state=base_state)
             try:
                 if isinstance(self.arch, ArchS390X):
                     # On s390x ifunc resolvers expect hwcaps.
@@ -136,10 +142,6 @@ class SimOS:
         if o.ABSTRACT_MEMORY not in state.options:
             state.memory.mem._preapproved_stack = IRange(actual_stack_end - stack_size, actual_stack_end)
 
-        if o.INITIALIZE_ZERO_REGISTERS in state.options:
-            highest_reg_offset, reg_size = max(state.arch.registers.values())
-            for i in range(0, highest_reg_offset + reg_size, state.arch.bytes):
-                state.registers.store(i, state.solver.BVV(0, state.arch.bits))
         if state.arch.sp_offset is not None:
             state.regs.sp = actual_stack_end
 
@@ -287,3 +289,96 @@ class SimOS:
 
     def syscall_from_number(self, number, allow_unsupported=True, abi=None):
         return None
+
+    def setup_gdt(self, state, gdt):
+        """
+        Write the GlobalDescriptorTable object in the current state memory
+
+        :param state: state in which to write the GDT
+        :param gdt: GlobalDescriptorTable object
+        :return:
+        """
+        state.memory.store(gdt.addr+8, gdt.table)
+        state.regs.gdt = gdt.gdt
+        state.regs.cs = gdt.cs
+        state.regs.ds = gdt.ds
+        state.regs.es = gdt.es
+        state.regs.ss = gdt.ss
+        state.regs.fs = gdt.fs
+        state.regs.gs = gdt.gs
+
+    def generate_gdt(self, fs, gs, fs_size=0xFFFFFFFF, gs_size=0xFFFFFFFF):
+        """
+        Generate a GlobalDescriptorTable object and populate it using the value of the gs and fs register
+
+        :param fs:      value of the fs segment register
+        :param gs:      value of the gs segment register
+        :param fs_size: size of the fs segment register
+        :param gs_size: size of the gs segment register
+        :return: gdt a GlobalDescriptorTable object
+        """
+        A_PRESENT = 0x80
+        A_DATA = 0x10
+        A_DATA_WRITABLE = 0x2
+        A_PRIV_0 = 0x0
+        A_DIR_CON_BIT = 0x4
+        F_PROT_32 = 0x4
+        S_GDT = 0x0
+        S_PRIV_0 = 0x0
+        GDT_ADDR = 0x4000
+        GDT_LIMIT = 0x1000
+
+        normal_entry = self._create_gdt_entry(0, 0xFFFFFFFF,
+                                             A_PRESENT | A_DATA | A_DATA_WRITABLE | A_PRIV_0 | A_DIR_CON_BIT,
+                                             F_PROT_32)
+        stack_entry = self._create_gdt_entry(0, 0xFFFFFFFF, A_PRESENT | A_DATA | A_DATA_WRITABLE | A_PRIV_0,
+                                            F_PROT_32)
+        fs_entry = self._create_gdt_entry(fs, fs_size,
+                                         A_PRESENT | A_DATA | A_DATA_WRITABLE | A_PRIV_0 | A_DIR_CON_BIT, F_PROT_32)
+        gs_entry = self._create_gdt_entry(gs, gs_size,
+                                         A_PRESENT | A_DATA | A_DATA_WRITABLE | A_PRIV_0 | A_DIR_CON_BIT, F_PROT_32)
+
+        table = normal_entry + stack_entry + fs_entry + gs_entry
+        gdt =  (GDT_ADDR << 16 | GDT_LIMIT)
+        selector = self._create_selector(1, S_GDT | S_PRIV_0)
+        cs = selector
+        ds = selector
+        es = selector
+        selector = self._create_selector(2, S_GDT | S_PRIV_0)
+        ss = selector
+        selector = self._create_selector(3, S_GDT | S_PRIV_0)
+        fs = selector
+        selector = self._create_selector(4, S_GDT | S_PRIV_0)
+        gs = selector
+        global_descriptor_table = GlobalDescriptorTable(GDT_ADDR, GDT_LIMIT, table, gdt, cs, ds, es, ss, fs, gs)
+        return global_descriptor_table
+
+    @staticmethod
+    def _create_selector(idx, flags):
+        to_ret = flags
+        to_ret |= idx << 3
+        return to_ret
+
+    @staticmethod
+    def _create_gdt_entry(base, limit, access, flags):
+        to_ret = limit & 0xffff
+        to_ret |= (base & 0xffffff) << 16
+        to_ret |= (access & 0xff) << 40
+        to_ret |= ((limit >> 16) & 0xf) << 48
+        to_ret |= (flags & 0xff) << 52
+        to_ret |= ((base >> 24) & 0xff) << 56
+        return struct.pack('<Q', to_ret)
+
+
+class GlobalDescriptorTable:
+    def __init__(self, addr, limit, table, gdt_sel, cs_sel, ds_sel, es_sel, ss_sel, fs_sel, gs_sel):
+        self.addr = addr
+        self.limit = limit
+        self.table = table
+        self.gdt = gdt_sel
+        self.cs = cs_sel
+        self.ds = ds_sel
+        self.es = es_sel
+        self.ss = ss_sel
+        self.fs = fs_sel
+        self.gs = gs_sel
